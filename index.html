@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>AsciiDoc → HTML</title>
+<style>
+  :root{--ink:#1f2328;--sub:#5a6069;--rule:#e2e0d9;--bg:#fbfbf9;--accent:#33415c}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{display:flex;flex-direction:column;background:var(--bg);color:var(--ink);
+       font:15px/1.6 -apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif}
+  header{display:flex;gap:8px;align-items:baseline;padding:10px 14px;border-bottom:1px solid var(--rule)}
+  header h1{margin:0;font-size:15px;font-weight:600;white-space:nowrap}
+  #status{font-size:11px;color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  nav{display:flex;border-bottom:1px solid var(--rule)}
+  nav button{flex:1;padding:10px;border:0;background:none;font-size:13px;color:var(--sub);
+             border-bottom:2px solid transparent}
+  nav button[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+  main{flex:1;min-height:0;position:relative}
+  .pane{position:absolute;inset:0;display:none}
+  .pane.on{display:block}
+  textarea,pre{width:100%;height:100%;margin:0;border:0;padding:12px;overflow:auto;
+    font:14px/1.55 ui-monospace,"SF Mono",Menlo,monospace;background:var(--bg);color:var(--ink)}
+  textarea{resize:none}
+  pre{white-space:pre-wrap;word-break:break-all}
+  iframe{width:100%;height:100%;border:0;background:#fff}
+  footer{display:flex;gap:8px;padding:10px 14px calc(10px + env(safe-area-inset-bottom));
+         border-top:1px solid var(--rule)}
+  footer button{flex:1;padding:11px 0;border:1px solid var(--rule);border-radius:8px;
+                background:#fff;color:var(--ink);font-size:14px}
+  footer button.main{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  footer button:disabled{opacity:.4}
+</style>
+</head>
+<body>
+<header><h1>AsciiDoc → HTML</h1><span id="status">起動中…</span></header>
+<nav>
+  <button data-tab="edit" aria-selected="true">編集</button>
+  <button data-tab="view" aria-selected="false">プレビュー</button>
+  <button data-tab="html" aria-selected="false">HTML</button>
+</nav>
+<main>
+  <div class="pane on" id="p-edit"><textarea id="src" placeholder="ここに .adoc を貼り付け"></textarea></div>
+  <div class="pane" id="p-view"><iframe id="frame" sandbox="allow-same-origin"></iframe></div>
+  <div class="pane" id="p-html"><pre id="out"></pre></div>
+</main>
+<footer>
+  <input type="file" id="file" accept=".adoc,.asciidoc,.ad,.asc,.txt" hidden>
+  <button id="open">開く</button>
+  <button id="copy" disabled>コピー</button>
+  <button id="save" class="main" disabled>HTMLを保存</button>
+</footer>
+<script>
+var $ = function(id){ return document.getElementById(id); };
+var adoc = null, full = '', logs = [];
+var FALLBACK_CSS = 'body{font:16px/1.7 -apple-system,"Hiragino Sans",sans-serif;margin:0;padding:16px;color:#1f2328}'
+  + 'h1,h2,h3,h4{line-height:1.35;margin:1.4em 0 .5em}h1{font-size:1.6em}h2{font-size:1.3em;border-bottom:1px solid #ddd;padding-bottom:.2em}'
+  + 'pre,code{font-family:ui-monospace,Menlo,monospace}pre{background:#f4f4f2;padding:10px;overflow:auto;border-radius:4px}'
+  + 'table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:5px 8px;text-align:left}'
+  + '.admonitionblock{border-left:3px solid #33415c;padding:6px 12px;background:#f4f4f2;margin:1em 0}';
+var css = FALLBACK_CSS;
+var CSS_URL = 'https://cdn.jsdelivr.net/gh/asciidoctor/asciidoctor/data/stylesheets/asciidoctor-default.css';
+
+function say(m){ logs.push(m); $('status').textContent = m; $('out').textContent = logs.join('\n'); }
+window.addEventListener('error', function(e){ say('JSエラー: ' + e.message); });
+
+function loadScript(src, ms){
+  return new Promise(function(ok, ng){
+    var s = document.createElement('script');
+    var t = setTimeout(function(){ ng(new Error('タイムアウト')); }, ms || 15000);
+    s.src = src;
+    s.onload = function(){ clearTimeout(t); ok(); };
+    s.onerror = function(){ clearTimeout(t); ng(new Error('取得失敗')); };
+    document.head.appendChild(s);
+  });
+}
+
+var UMD = [
+  'https://cdn.jsdelivr.net/npm/@asciidoctor/core@2.2.6/dist/browser/asciidoctor.js',
+  'https://unpkg.com/@asciidoctor/core@2.2.6/dist/browser/asciidoctor.js',
+  'https://cdn.jsdelivr.net/npm/asciidoctor@2.2.6/dist/browser/asciidoctor.js'
+];
+var ESM = [
+  'https://cdn.jsdelivr.net/npm/@asciidoctor/core@3.0.4/+esm',
+  'https://cdn.jsdelivr.net/npm/@asciidoctor/core/+esm'
+];
+
+(async function(){
+  var factory = null, i;
+  for (i = 0; i < UMD.length; i++){
+    say('読込中 ' + (i+1) + '/' + UMD.length);
+    try { await loadScript(UMD[i]); }
+    catch (e) { logs.push('  ' + UMD[i] + ' → ' + e.message); continue; }
+    if (typeof window.Asciidoctor === 'function'){ factory = window.Asciidoctor; break; }
+    logs.push('  ' + UMD[i] + ' → APIが見つからない');
+  }
+  if (!factory){
+    for (i = 0; i < ESM.length; i++){
+      say('読込中 ESM ' + (i+1));
+      try {
+        var m = await import(ESM[i]);
+        if (typeof m.default === 'function'){ factory = m.default; break; }
+        logs.push('  ' + ESM[i] + ' → APIが見つからない');
+      } catch (e) { logs.push('  ' + ESM[i] + ' → ' + (e.message || e)); }
+    }
+  }
+  if (!factory){ say('ライブラリ取得失敗（HTMLタブに詳細）'); return; }
+
+  adoc = factory();
+  $('copy').disabled = false;
+  $('save').disabled = false;
+  logs = [];
+  say('Asciidoctor ' + adoc.getVersion() + ' 準備完了');
+
+  fetch(CSS_URL).then(function(r){ return r.ok ? r.text() : Promise.reject(new Error(r.status)); })
+    .then(function(t){ css = t; })
+    .catch(function(){ say('公式CSS取得失敗・簡易CSSを使用'); });
+})();
+
+function convert(){
+  if (!adoc) return '';
+  var body;
+  try {
+    body = adoc.convert($('src').value, {
+      safe: 'safe',
+      attributes: { showtitle: true, toc: 'auto', sectanchors: true, icons: 'font' }
+    });
+  } catch (e) {
+    body = '<pre>変換エラー: ' + String(e.message || e) + '</pre>';
+  }
+  full = '<!DOCTYPE html>\n<html lang="ja"><head><meta charset="utf-8">'
+       + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+       + '<style>\n' + css + '\n</style></head><body class="article">'
+       + '<div id="content">' + body + '</div></body></html>';
+  $('out').textContent = full;
+  $('frame').srcdoc = full;
+  return full;
+}
+
+Array.prototype.forEach.call(document.querySelectorAll('nav button'), function(b){
+  b.onclick = function(){
+    Array.prototype.forEach.call(document.querySelectorAll('nav button'), function(x){
+      x.setAttribute('aria-selected', x === b);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('.pane'), function(p){ p.classList.remove('on'); });
+    $('p-' + b.dataset.tab).classList.add('on');
+    if (b.dataset.tab !== 'edit' && adoc) convert();
+  };
+});
+
+$('open').onclick = function(){ $('file').click(); };
+$('file').onchange = async function(e){
+  var f = e.target.files[0]; if (!f) return;
+  $('src').value = await f.text();
+  say(f.name);
+};
+$('copy').onclick = async function(){
+  convert();
+  try { await navigator.clipboard.writeText(full); say('コピーしました'); }
+  catch (err) { say('コピー不可・HTMLタブから手動選択してください'); }
+};
+$('save').onclick = function(){
+  convert();
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([full], { type: 'text/html' }));
+  a.download = 'output.html';
+  a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 5000);
+};
+</script>
+</body>
+</html>
